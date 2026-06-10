@@ -1,0 +1,529 @@
+---
+title: "MetabaR_MiFish_Double_Script"
+author: "Emilien"
+date: "2026-03-17"
+output: html_document
+---
+
+#########################################################################################################################################################
+# Gros Script Fonctionel 
+#########################################################################################################################################################
+
+## Introduction
+
+Ce document présente les étapes de filtraiton avec le package metabar et de compilation des données de metabarcoding d'ADN digestif à a partir du fichier de sortie d'OBITOOLS: étape de filtration des PCRs pas assez couvertes, des occurences correspondant à des contaminants et tagsjumps avec le package METABAR, compilation des tables d'abondance et du fichier fasta pour assignations # des indices quantitatifs (FO, POO, RAA)
+
+## Préalable : fichiers nécessaires pour la création de l'objet metabarlist (package metabar)
+
+Avant de commencer, il est nécessaire de créer, à partir du fichier *.tab de sortie d'obitools, les fichiers `reads.txt`, `pcr.txt`, `motus.txt` et 'sample.txt' comme indiqué dans le tutoriel de metabaR : [metabaR  tutorial](https://metabarfactory.github.io/metabaR/articles/metabaRF-vignette.html#package-overview).
+
+- Le fichier `reads.txt` est une table d'abondance avec une ligne par PCR et les MOTUs en colonne. 
+En entête des colonnes, les ID des MOTUS. En entête des lignes, les ID des PCRs.
+
+- Le fichier `pcr.txt` nous renseigne doit indiquer à minima : 
+  - sample_id
+  - type : "sample" ou "control"
+  - control_type : NA, extraction, sequencing, PCR, positive
+  - numéro de plaque (plate_no), et coordonnées sur les plaques (plate_col et plate_row).
+  
+- Le fichier `motus.txt` contient l'ID du MOTU, la séquence nucléotidique, et l'abondance totale des MOTUs.
+
+- Le fichier `sample.txt`contient le sample_id, le nom commun et latin de l'espèce, le site, et les autres paramètres importants pour les analyses statistiques ultérieures.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+## 1. Paramêtres généraux
+
+```{r parameters}
+year <- "2026"              
+marker <- "MiFish"
+
+seuil_prof <- 1000 # nombre de reads minimum par PCR
+seuil_tagjumps <- 0.03 # nombre de reads minimum par PCR
+
+base_dir <- "C:/Users/efoucaud/Desktop/R_Data_Manipulatio/MiFish"
+
+analysis_dir <- file.path(base_dir)
+
+setwd(analysis_dir)
+```
+
+## 2. Chargement des librairies
+
+```{r libraries}
+library(metabaR)
+library(ggplot2)
+library(tibble)
+library(reshape2)
+library(dplyr)
+```
+
+## 3. Importation et Pré-traitement et Création de l'objet metabarlist
+
+Pour la création du fichier metabarlist, Le fichier 'pcr.txt' doit contenir uniquement les ID de PCR présents dans la table d'abondance 'reads.txt'. Or il arrive que certains ID PCR n'apparaissent pas dans la table d'abondance à la sortie d'OBITOOLS car elles ne contenaient aucun read.  
+
+Pour éliminer les ID de PCR non présents dans la table reads : 
+
+```{r pretraitement, include=TRUE, cache=TRUE}
+
+file_prefix <- paste0("RANCE", year, "_", marker)
+
+files <- list(
+  reads   = file.path(analysis_dir, paste0(file_prefix, "_READS.txt")),
+  motus   = file.path(analysis_dir, paste0(file_prefix, "_MOTUS.txt")),
+  pcrs    = file.path(analysis_dir, paste0(file_prefix, "_PCR.txt")),
+  samples = file.path(analysis_dir, paste0(file_prefix, "_SAMPLES.txt"))
+)
+
+files
+file.exists(unlist(files))
+
+# Création de l'objet metabarlist
+
+RANCE_metabar <- tabfiles_to_metabarlist(
+  file_reads   = files$reads,
+  file_motus   = files$motus,
+  file_pcrs    = files$pcrs,
+  file_samples = files$samples
+)
+
+summary_metabarlist(RANCE_metabar)
+
+# Visualisation des 4 premières plaques...
+
+plot_plate <- subset_metabarlist(RANCE_metabar, table="pcrs", indices = (as.numeric(RANCE_metabar$pcrs$plate_no) %in% c(1,2,3,4)))
+
+ggpcrplate(plot_plate, FUN = function(m){rowSums(m$reads)}, legend_title = "# of reads par PCR")
+
+
+```
+
+# Permet de voir pour le 18S les bons contrôles
+
+```{r}
+table(
+RANCE_metabar$pcrs$plate_row[RANCE_metabar$pcrs$type=="control"],
+RANCE_metabar$pcrs$plate_col[RANCE_metabar$pcrs$type=="control"]
+)
+
+subset_controls <- RANCE_metabar$pcrs[
+RANCE_metabar$pcrs$type=="control" &
+RANCE_metabar$pcrs$plate_no %in% c(1,2,3,4),
+]
+
+table(subset_controls$plate_row, subset_controls$plate_col)
+```
+
+## 4. Visualisation du nombre de reads et motus pour les différents types de témoins négatifs et les échantillons (boxplot)
+
+```{r visualisation, include=TRUE}
+
+RANCE_metabar$pcrs$nb_reads <- rowSums(RANCE_metabar$reads)
+
+RANCE_metabar$pcrs$nb_motus <- rowSums(RANCE_metabar$reads>0)
+
+check1 <- melt(RANCE_metabar$pcrs[,c("control_type", "nb_reads", "nb_motus")])
+
+check1 <- check1 %>%
+  mutate(control_type = ifelse(is.na(control_type), "sample", as.character(control_type)))
+
+# Plot Brut 
+ggplot(data <- check1, aes(x=control_type, y=value, color=control_type)) +
+  geom_boxplot() + theme_bw() + 
+  geom_jitter(alpha=0.2) +
+  scale_color_manual(values = c("brown", "red", "cyan4","pink"), na.value = "darkgrey") +
+  facet_wrap(~variable, scales = "free_y") +
+  theme(axis.text.x = element_text(angle=45, h=1))
+
+# Permet d'avoir une meilleure résolution 
+ggplot(data = check1, aes(x=control_type, y=value, color=control_type)) +
+  geom_boxplot() + 
+  theme_bw() +
+  geom_jitter(alpha=0.2) +
+  scale_color_manual(values = c("brown", "red", "cyan4", "pink"), 
+                     na.value = "darkgrey") +
+  facet_wrap(~variable, scales = "free_y") +
+  scale_y_log10() +  
+  theme(axis.text.x = element_text(angle=45, hjust=1))
+
+```
+
+## 5. Filtation des données avec metabar : contaminations, couverture des PCRS et fuite de tags
+
+# Contamination 
+
+Dans un premier temps, on va filtrer les contaminations en utilisant les controles négatifs avec la fonction 'contaslayer' de metabar.
+
+La fonction ajoute une nouvelle colonne à la table 'motus' qui indique si le motu est authentique (TRUE) ou un contaminant (FALSE).
+
+```{r filtre_contaslayer, include=TRUE}
+
+RANCE_metabar <- contaslayer(RANCE_metabar,
+                              control_types = c("pcr","extraction"),
+                              output_col = "not_a_contaminant")
+
+
+cat("Sur les ", nrow(RANCE_metabar$motus)," MOTUs, il y a ",sum(RANCE_metabar$motus$not_a_contaminant == FALSE)," MOTUS filtrées car considérées comme des des contaminants.", "\n")
+
+id_contaminants <- !RANCE_metabar$motus$not_a_contaminant
+
+max.conta <- rownames(RANCE_metabar$motus[id_contaminants,])[which.max(RANCE_metabar$motus[id_contaminants, "count"])]
+
+plot_plate <- subset_metabarlist(RANCE_metabar, table="pcrs", indices = (as.numeric(RANCE_metabar$pcrs$plate_no) %in% c(1,2,3,4)))
+
+ggpcrplate(plot_plate, legend_title = "#reads of most \nabundant contaminant",
+           FUN = function(m) {m$reads[, max.conta]/rowSums(m$reads)})
+
+
+```
+
+
+# Couverture des PCRs
+
+Dans un second temps, on va filtrer les pcr qui contiennent pas assez de reads. Le seuil qu'on utilise ici **`r seuil_prof`** reads. 
+Ce seuil doit être ajusté en fonction de la profondeur de séquençage utilisé. 
+
+```{r filtre_profondeur, echo=TRUE}
+
+# on inspecte la distribution du nombre de reads par PCR pour vérifier la pertinence du seuil (ligne pointillée en rouge)
+
+ggplot(RANCE_metabar$pcrs, aes(nb_reads)) +
+  geom_histogram(bins=40, color="grey", fill="white") +
+  geom_vline(xintercept = as.numeric(paste(seuil_prof)), lty=2, color="orange") + # threshold
+  scale_x_log10() +
+  labs(x="# Reads (with all MOTUs and PCRs)",
+       y="# PCRs") +
+  theme_bw() +
+  theme(panel.grid = element_blank())
+
+# on ajouter une colonne 'seqdepth_ok' aux PCR avec la bonne profondeur
+
+RANCE_metabar$pcrs$seqdepth_ok <- ifelse(RANCE_metabar$pcrs$nb_reads < as.numeric(paste(seuil_prof)), F, T)
+
+cat("Sur les ", sum(RANCE_metabar$pcrs$type == "sample")," PCRS correspondant à des échantillons, il y a ",sum(RANCE_metabar$pcrs$seqdepth_ok == FALSE & RANCE_metabar$pcrs$type =="sample")," MOTUS filtrées car avec < ",seuil_prof," reads.", "\n")
+
+
+summary_metabarlist(RANCE_metabar)
+
+```
+
+# Tag Jumps
+
+La troisième filtre consiste à identifier les 'tagjumps' (ou fuite de tags) qui sont des faux-positifs liés à des erreurs de PCR/séquençage dans la séquence des indexs utilisés pour le démultiplexage. Les 'tag-jumps' sont fréquence-dépendants, c'est-à-dire que les MOTUs abondants sont plus susceptibles d'être trouvés en faible abondance dans les échantillons où ils ne sont pas censés être présents, par rapport aux MOTUs rares.
+
+Pour réduire le nombre de faux positifs de ce type, la fonction 'tagjumpslayer' considère chaque MOTU séparément et corrige son abondance dans les PCR lorsque l'abondance relative du MOTU dans l'ensemble du jeu de données est inférieure à un seuil donné. Par défaut, ce seuil est de **`r seuil_tagjumps`**. 
+
+L'effet de ce seuil peut être évalué en testant comment cette procédure de filtration affecte les caractéristiques de base du jeu de données (par exemple, le nombre de MOTUs ou de lectures) à différents niveaux, comme illustré ci-dessous :
+
+```{r filtre_tagjumps_exploration, eval=FALSE, warning=FALSE, include=FALSE}
+
+#on test différents seuils
+thresholds <- c(0,1e-4,1e-3, 1e-2, 3e-2, 5e-2,0.1,0.3,0.9)
+
+# Lancer les analyses et les conserver dans une liste 
+tests <- lapply(thresholds, function(x) tagjumpslayer(RANCE_metabar,x))
+names(tests) <- paste("t_", thresholds, sep="")
+
+# Formatage des données pour ggplot avec la quantité de reads pour chaque valeur de seuil 
+tmp <- melt(as.matrix(do.call("rbind", lapply(tests, function(x) rowSums(x$reads)))))
+colnames(tmp) <- c("threshold", "sample", "abundance")
+
+# Ajouter la richesse en MOTUs pour chaque valeur de seuil 
+
+tmp$richness <-
+  melt(as.matrix(do.call("rbind", lapply(tests, function(x) {
+    rowSums(x$reads > 0)
+  }))))$value
+
+# Ajouter l'information sur le type de control pour chaque pcr
+tmp$controls <- RANCE_metabar$pcrs$control_type[match(tmp$sample, rownames(RANCE_metabar$pcrs))]
+tmp$threshold <- as.numeric(gsub("t_", "", tmp$threshold))
+
+# Nouvelle table pour ggplot
+tmp2 <- melt(tmp, id.vars=colnames(tmp)[-grep("abundance|richness", colnames(tmp))])
+
+ggplot(tmp2, aes(x=as.factor(threshold), y=value)) +
+  geom_boxplot(color="grey40") +
+  geom_vline(xintercept = which(levels(as.factor(tmp2$threshold)) == "0.01"), col="orange", lty=2) +
+  geom_jitter(aes(color=controls), width = 0.2, alpha=0.5) +
+  scale_color_manual(values = c("brown", "red", "cyan4","pink"), na.value = "darkgrey") +
+  facet_wrap(~variable+controls, scale="free_y", ncol=5) +
+  theme_bw() +
+  scale_y_log10() +
+  labs(x="MOTU pcr : total abundance filtering threshold", y="# Reads/MOTUs") +
+  theme(panel.grid = element_blank(),
+        strip.background = element_blank(),
+        axis.text.x = element_text(angle=40, h=1),
+        legend.position = "none")
+
+```
+
+# Application des 3 filtres
+
+On applique les 3 filtres de metabar (conta, profondeur et tagjumps) et on supprime les PCR désormais vides de MOTUs :
+
+```{r filtre, echo=TRUE, warning=FALSE}
+
+seuil_tagjumps = 0.03
+
+RANCE_metabar_clean <- tagjumpslayer(RANCE_metabar, threshold = seuil_tagjumps, method = "cut") # filtre tagjumps avec le seuil défini en variable (0.01 par défaut)
+
+RANCE_metabar_clean <- subset_metabarlist(RANCE_metabar_clean, "motus",  
+                                      indices = grepl("TRUE",RANCE_metabar$motus$not_a_contaminant))  #on élimine les motus contaminantes
+
+RANCE_metabar_clean <- subset_metabarlist(RANCE_metabar_clean, "pcrs",
+                                      indices = grepl("TRUE", RANCE_metabar$pcrs$seqdepth_ok))  #on élimine les pcrs pas assez couvertes
+
+RANCE_metabar_clean$pcrs$nb_reads <- rowSums(RANCE_metabar_clean$reads)
+
+RANCE_metabar_clean <-  subset_metabarlist(RANCE_metabar_clean, "pcrs", indices = (RANCE_metabar_clean$pcrs$nb_reads > 0)) #on elimine les pcr vides apres elimination des motus contaminants.
+
+RANCE_metabar_clean <- subset_metabarlist(RANCE_metabar_clean, "pcrs", indices = grepl("sample",RANCE_metabar_clean$pcrs$type)) # on ne garde que les échantillons / on élimine les témoins
+
+
+summary_metabarlist(RANCE_metabar_clean)
+```
+## 6. Exportation des 4 tableaux propres 
+
+```{r}
+write.table(RANCE_metabar_clean$reads, "reads_clean.txt", sep="\t", quote=FALSE)
+write.table(RANCE_metabar_clean$motus, "motus_clean.txt", sep="\t", quote=FALSE)
+write.table(RANCE_metabar_clean$pcrs, "pcrs_clean.txt", sep="\t", quote=FALSE)
+write.table(RANCE_metabar_clean$samples, "samples_clean.txt", sep="\t", quote=FALSE)
+```
+
+#########################################################################################################################################################
+#########################################################################################################################################################
+#########################################################################################################################################################
+#########################################################################################################################################################
+# Petite Script Fonctionel 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+## 1. Paramêtres généraux
+
+```{r parameters}
+year <- "2026"              
+marker <- "MiFish"
+
+min_reads_pcr <- 1000
+tagjump_threshold <- 0.03
+
+base_dir <- "C:/Users/efoucaud/Desktop/R_Data_Manipulatio/MiFish"
+
+analysis_dir <- file.path(base_dir)
+
+setwd(analysis_dir)
+```
+
+## 2. Chargement des librairies
+
+```{r libraries}
+library(metabaR)
+library(ggplot2)
+library(tibble)
+library(reshape2)
+library(dplyr)
+```
+
+## 3. Import des données
+
+```{r import_files}
+file_prefix <- paste0("RANCE", year, "_", marker)
+
+files <- list(
+  reads   = file.path(analysis_dir, paste0(file_prefix, "_READS.txt")),
+  motus   = file.path(analysis_dir, paste0(file_prefix, "_MOTUS.txt")),
+  pcrs    = file.path(analysis_dir, paste0(file_prefix, "_PCR.txt")),
+  samples = file.path(analysis_dir, paste0(file_prefix, "_SAMPLES.txt"))
+)
+
+files
+file.exists(unlist(files))
+```
+## 4. Création de l'objet metabar
+
+```{r import_metabar}
+MiFish <- tabfiles_to_metabarlist(
+  file_reads   = files$reads,
+  file_motus   = files$motus,
+  file_pcrs    = files$pcrs,
+  file_samples = files$samples
+)
+
+summary_metabarlist(MiFish)
+
+#virer les asv et pcr vides
+
+#1. Supprimer les PCRs vides (sans aucun read)
+MiFish <- subset_metabarlist(MiFish, 
+                                 table = "pcrs", 
+                                 indices = rowSums(MiFish$reads) > 0)
+
+# 2. Supprimer les MOTUs vides (qui ne sont présents dans aucune PCR restante)
+MiFish <- subset_metabarlist(MiFish, 
+                                 table = "motus", 
+                                 indices = colSums(MiFish$reads) > 0)
+
+```
+
+## 5. Détection des contaminants
+
+```{r contaslayer}
+
+MiFish_conta <- contaslayer(
+  MiFish,
+  control_types = c("extraction","pcr"),
+  output_col = "not_a_contaminant"
+)
+
+table(MiFish_conta$motus$not_a_contaminant)
+
+
+```
+
+## 6. Nettoyage final : suppression des contaminants et controles
+
+```{r final_clean}
+
+# Supprimer les contaminants
+
+MiFish_clean <- subset_metabarlist(
+  MiFish_conta,
+  table = "motus",
+  indices = MiFish_conta$motus$not_a_contaminant
+)
+
+# Ne garder que les échantillons (exclude controls)
+
+MiFish_clean <- subset_metabarlist(
+  MiFish_clean,
+  table = "pcrs",
+  indices = MiFish_clean$pcrs$type == "sample"
+  )
+
+```
+
+## 7. Filtrage des tag-jumps
+
+```{r tagjump}
+
+MiFish_tagclean <- tagjumpslayer(
+  MiFish_clean,
+  threshold = tagjump_threshold,
+  method = "cut"
+)
+
+```
+
+## 8. Final filtering of PCRs based on coverage
+
+```{r final_filter}
+MiFish_tagclean$pcrs$nb_reads <- rowSums(MiFish_tagclean$reads)
+head(MiFish_tagclean$pcrs$nb_reads)
+
+ggplot(MiFish_tagclean$pcrs, aes(nb_reads)) +
+  geom_histogram(bins = 40, color = "grey40", fill = "white") +
+  geom_vline(xintercept = min_reads_pcr, linetype = 2, color = "orange") +
+  scale_x_log10() +
+  theme_bw()
+
+# Flag of valid PCRs
+MiFish_tagclean$pcrs$seqdepth_ok <- 
+  MiFish_tagclean$pcrs$nb_reads >= min_reads_pcr
+
+# Check the number of valid PCR tests
+table(MiFish_tagclean$pcrs$seqdepth_ok)
+
+# Filter out PCR tests that are not sufficiently covered
+MiFish_tagclean <- subset_metabarlist(
+  MiFish_tagclean,
+  table = "pcrs",
+  indices = MiFish_tagclean$pcrs$seqdepth_ok
+)
+```
+
+## 9. Export des tables finales
+
+```{r final_filter}
+
+# Nom de l'objet final à exporter
+final_obj <- MiFish_tagclean
+
+# Tous les fichiers seront enregistrés dans le dossier de l'année
+# (analysis_dir déjà défini dans le chunk paramètres)
+
+# Motus
+motus_file <- file.path(analysis_dir, paste0("clean_motus_", year, ".txt"))
+motus_table <- extract_table(final_obj, "motus")
+
+# Transformer les noms de lignes en colonne et la renommer "motus_id"
+motus_table$ASV_id <- rownames(motus_table)
+rownames(motus_table) <- NULL  # on supprime les noms de lignes
+
+# Réorganiser pour que la colonne motus_id soit en première position
+motus_table <- motus_table[, c("ASV_id", setdiff(colnames(motus_table), "ASV_id"))]
+
+# Exporter
+write.table(motus_table, motus_file, sep = "\t", row.names = FALSE, quote = FALSE)
+
+# Reads
+reads_file <- file.path(analysis_dir, paste0("clean_reads_", year, ".txt"))
+
+# Extraire et convertir en data.frame
+reads_table <- as.data.frame(extract_table(final_obj, "reads"))
+
+# Transformer les noms de lignes en colonne "pcr_id"
+reads_table$pcr_id <- rownames(reads_table)
+rownames(reads_table) <- NULL  # supprimer les noms de lignes
+
+# Réorganiser pour que "pcr_id" soit la première colonne
+reads_table <- reads_table[, c("pcr_id", setdiff(colnames(reads_table), "pcr_id"))]
+
+# Exporter
+write.table(reads_table, reads_file, sep = "\t", row.names = FALSE, quote = FALSE)
+
+# PCRs
+pcrs_file <- file.path(analysis_dir, paste0("clean_pcrs_", year, ".txt"))
+pcrs_table <- extract_table(final_obj, "pcrs")
+
+# Transformer les noms de lignes en colonne et la renommer "pcr_id"
+pcrs_table$pcr_id <- rownames(pcrs_table)
+rownames(pcrs_table) <- NULL  # on supprime les noms de lignes
+
+# Réorganiser pour que la colonne pcr_id soit en première position
+pcrs_table <- pcrs_table[, c("pcr_id", setdiff(colnames(pcrs_table), "pcr_id"))]
+
+# Exporter
+write.table(pcrs_table, pcrs_file, sep = "\t", row.names = FALSE, quote = FALSE)
+
+# Samples
+samples_file <- file.path(analysis_dir, paste0("clean_samples_", year, ".txt"))
+samples_table <- extract_table(final_obj, "samples")
+
+# Transformer les noms de lignes en colonne et la renommer "sample_id"
+samples_table$sample_id <- rownames(samples_table)
+rownames(samples_table) <- NULL  # on supprime les noms de lignes
+
+# Réorganiser pour que la colonne sample_id soit en première position
+samples_table <- samples_table[, c("sample_id", setdiff(colnames(samples_table), "sample_id"))]
+
+# Exporter
+write.table(samples_table, samples_file, sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+
+
+
